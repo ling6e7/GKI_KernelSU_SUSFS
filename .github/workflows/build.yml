@@ -1420,15 +1420,7 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
           echo "=== 正在应用通用旁路供电 (Battery Idle) 补丁 ==="
-          if [ -f "$GITHUB_WORKSPACE/battery_idle.patch" ]; then
-            if patch -p1 --forward < "$GITHUB_WORKSPACE/battery_idle.patch"; then
-              echo "通用旁路供电补丁应用成功！"
-            else
-              echo "::warning::旁路供电补丁应用失败或已应用"
-            fi
-          else
-            echo "::warning::未找到 battery_idle.patch"
-          fi
+          python3 "$GITHUB_WORKSPACE/apply_battery_idle.py" 
 
       - name: 添加 SUSFS 配置
         if: inputs.enable_susfs
