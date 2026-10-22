@@ -1,10 +1,9 @@
---- a/drivers/power/supply/power_supply_sysfs.c	2026-10-22 20:25:01.786076981 +0800
-+++ b/drivers/power/supply/power_supply_sysfs.c	2026-10-22 20:25:12.312026056 +0800
-@@ -261,6 +261,68 @@
+--- a/drivers/power/supply/power_supply_sysfs.c
++++ b/drivers/power/supply/power_supply_sysfs.c
+@@ -261,6 +261,65 @@ static ssize_t power_supply_show_usb_type(struct device *dev,
  	return count;
  }
  
-+
 +static int g_battery_idle_state = 0;
 +
 +static ssize_t battery_idle_show(struct device *dev,
@@ -24,7 +23,8 @@
 +		return -EINVAL;
 +
 +	g_battery_idle_state = !!val;
-+	power_supply_changed(psy);
++	if (psy)
++		power_supply_changed(psy);
 +	return count;
 +}
 +
@@ -40,16 +40,14 @@
 +				      const char *buf, size_t count)
 +{
 +	struct power_supply *psy = dev_get_drvdata(dev);
-+	union power_supply_propval val;
 +	int ret;
 +
 +	if (kstrtoint(buf, 10, &ret) < 0)
 +		return -EINVAL;
 +
 +	g_battery_idle_state = !ret;
-+	val.intval = ret;
-+	power_supply_set_property(psy, POWER_SUPPLY_PROP_CHARGING_ENABLED, &val);
-+	power_supply_changed(psy);
++	if (psy)
++		power_supply_changed(psy);
 +	return count;
 +}
 +
@@ -69,11 +67,11 @@
  static ssize_t power_supply_show_property(struct device *dev,
  					  struct device_attribute *attr,
  					  char *buf) {
-@@ -270,6 +332,13 @@
+@@ -270,6 +329,13 @@ static ssize_t power_supply_show_property(struct device *dev,
  	enum power_supply_property psp = dev_attr_psp(attr);
  	union power_supply_propval value;
  
-+		if (g_battery_idle_state && psy && psy->desc && psy->desc->type == POWER_SUPPLY_TYPE_BATTERY) {
++	if (g_battery_idle_state && psy && psy->desc && psy->desc->type == POWER_SUPPLY_TYPE_BATTERY) {
 +		if (psp == POWER_SUPPLY_PROP_STATUS)
 +			return sprintf(buf, "Not charging\n");
 +		if (psp == POWER_SUPPLY_PROP_CURRENT_NOW)
@@ -83,11 +81,10 @@
  	if (psp == POWER_SUPPLY_PROP_TYPE) {
  		value.intval = psy->desc->type;
  	} else {
-@@ -383,6 +452,7 @@
+@@ -383,6 +449,7 @@ static struct attribute_group power_supply_attr_group = {
  
  static const struct attribute_group *power_supply_attr_groups[] = {
  	&power_supply_attr_group,
 +	&battery_idle_attr_group,
  	NULL,
  };
- 
