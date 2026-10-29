@@ -11,7 +11,7 @@ with open(target_file, "r") as f:
 
 header = '''
 #include <linux/fs.h>
-#include <linux/cred.h>
+#include <linux/err.h>
 
 static int g_battery_idle_state = 0;
 static int g_saved_fcc = -1;
@@ -21,15 +21,12 @@ static void xm_set_hardware_bypass(int enable)
 	struct file *f;
 	loff_t pos = 0;
 	const char *val = enable ? "1\\n" : "0\\n";
-	const struct cred *old_cred;
 
-	old_cred = override_creds(&init_cred);
 	f = filp_open("/sys/class/qcom-battery/night_charging", O_WRONLY, 0);
 	if (!IS_ERR(f)) {
 		kernel_write(f, val, 2, &pos);
 		filp_close(f, NULL);
 	}
-	revert_creds(old_cred);
 }
 
 static ssize_t battery_idle_show(struct device *dev,
