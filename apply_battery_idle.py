@@ -11,6 +11,7 @@ with open(target_file, "r") as f:
 
 header = '''
 static int g_battery_idle_state = 0;
+static int g_saved_fcc = -1;
 
 static ssize_t battery_idle_show(struct device *dev,
 				 struct device_attribute *attr,
@@ -25,12 +26,34 @@ static ssize_t battery_idle_store(struct device *dev,
 {
 	struct power_supply *psy = dev_get_drvdata(dev);
 	int val;
+
 	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
 
-	g_battery_idle_state = !!val;
-	if (psy)
+	if (psy && psy->desc && psy->desc->type == POWER_SUPPLY_TYPE_BATTERY) {
+		union power_supply_propval pval;
+
+		if (val) {
+			/* 开启硬件真旁路供电：保存原快充电流，并通过硬件接口下发 0 uA */
+			g_battery_idle_state = 1;
+			if (psy->desc->get_property &&
+			    psy->desc->get_property(psy, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &pval) == 0) {
+				if (pval.intval > 0)
+					g_saved_fcc = pval.intval;
+			}
+			pval.intval = 0;
+			if (psy->desc->set_property)
+				psy->desc->set_property(psy, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &pval);
+		} else {
+			/* 关闭硬件真旁路供电：恢复原快充电流 */
+			g_battery_idle_state = 0;
+			pval.intval = (g_saved_fcc > 0) ? g_saved_fcc : -1;
+			if (psy->desc->set_property)
+				psy->desc->set_property(psy, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &pval);
+		}
 		power_supply_changed(psy);
+	}
+
 	return count;
 }
 
@@ -45,16 +68,12 @@ static ssize_t charging_enabled_store(struct device *dev,
 				      struct device_attribute *attr,
 				      const char *buf, size_t count)
 {
-	struct power_supply *psy = dev_get_drvdata(dev);
-	int ret;
+	int val;
 
-	if (kstrtoint(buf, 10, &ret) < 0)
+	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
 
-	g_battery_idle_state = !ret;
-	if (psy)
-		power_supply_changed(psy);
-	return count;
+	return battery_idle_store(dev, attr, val ? "0" : "1", count);
 }
 
 static DEVICE_ATTR_RW(battery_idle);
@@ -71,17 +90,34 @@ static const struct attribute_group battery_idle_attr_group = {
 };
 '''
 
-intercept = '''
+thermal_block = '''
+	/*
+	 * 硬件真旁路防护：当旁路模式激活时，阻止外部 mi_thermald 等温控守护进程
+	 * 周期性覆写 CHARGE_CONTROL_LIMIT 从而重新唤醒大电流快充！
+	 */
 	if (g_battery_idle_state && psy && psy->desc && psy->desc->type == POWER_SUPPLY_TYPE_BATTERY) {
-		if (psp == POWER_SUPPLY_PROP_STATUS)
-			return sprintf(buf, "Not charging\\n");
-		if (psp == POWER_SUPPLY_PROP_CURRENT_NOW)
-			return sprintf(buf, "0\\n");
+		if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT) {
+			return count;
+		}
 	}
+'''
+
+visible_patch = '''			if (property == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT)
+				mode |= S_IWUSR;
 '''
 
 assert 'static ssize_t power_supply_show_property(' in content, "Marker show_property not found!"
 content = content.replace('static ssize_t power_supply_show_property(', header + '\nstatic ssize_t power_supply_show_property(')
+
+target_store = 'value.intval = ret;\n\n\tret = power_supply_set_property(psy, psp, &value);'
+replacement_store = 'value.intval = ret;\n' + thermal_block + '\n\tret = power_supply_set_property(psy, psp, &value);'
+assert target_store in content, "Marker target_store not found!"
+content = content.replace(target_store, replacement_store)
+
+target_visible = 'if (psy->desc->property_is_writeable &&\n\t\t\t    psy->desc->property_is_writeable(psy, property) > 0)\n\t\t\t\tmode |= S_IWUSR;\n\n\t\t\treturn mode;'
+replacement_visible = 'if (psy->desc->property_is_writeable &&\n\t\t\t    psy->desc->property_is_writeable(psy, property) > 0)\n\t\t\t\tmode |= S_IWUSR;\n\n' + visible_patch + '\n\t\t\treturn mode;'
+assert target_visible in content, "Marker target_visible not found!"
+content = content.replace(target_visible, replacement_visible)
 
 target_group = '''static const struct attribute_group *power_supply_attr_groups[] = {
 	&power_supply_attr_group,
@@ -95,10 +131,7 @@ replacement_group = '''static const struct attribute_group *power_supply_attr_gr
 assert target_group in content, "Marker attribute_groups not found!"
 content = content.replace(target_group, replacement_group)
 
-assert 'if (psp == POWER_SUPPLY_PROP_TYPE) {' in content, "Marker psp == PROP_TYPE not found!"
-content = content.replace('if (psp == POWER_SUPPLY_PROP_TYPE) {', intercept + '\n\tif (psp == POWER_SUPPLY_PROP_TYPE) {')
-
 with open(target_file, "w") as f:
     f.write(content)
 
-print(f"Successfully injected Battery Idle sysfs patch into {target_file}!")
+print(f"Successfully injected True Battery Idle hardware patch into {target_file}!")
