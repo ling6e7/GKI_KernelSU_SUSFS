@@ -12,20 +12,52 @@ with open(target_file, "r") as f:
 header = '''
 #include <linux/fs.h>
 #include <linux/err.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
 
 static int g_battery_idle_state = 0;
 static int g_saved_fcc = -1;
 
-static void xm_set_hardware_bypass(int enable)
+static void xm_write_sysfs(const char *path, const char *val, size_t len)
 {
 	struct file *f;
 	loff_t pos = 0;
-	const char *val = enable ? "1\\n" : "0\\n";
 
-	f = filp_open("/sys/class/qcom-battery/night_charging", O_WRONLY, 0);
+	f = filp_open(path, O_WRONLY, 0);
 	if (!IS_ERR(f)) {
-		kernel_write(f, val, 2, &pos);
+		kernel_write(f, val, len, &pos);
 		filp_close(f, NULL);
+	}
+}
+
+static void xm_set_hardware_bypass(int enable)
+{
+	if (enable) {
+		/*
+		 * 硬件真旁路四重锁死（适配高通 ADSP / 小米 8+ Gen1 平台）：
+		 * 1. night_charging = 1 (激活 ADSP 夜间充电保护 0mA 投票器)
+		 * 2. restrict_chg = 1   (激活 ADSP 驻店限制充电模式)
+		 * 3. restrict_cur = 0   (将驻店限制充电电流上限硬锁为 0 uA，彻底突破 80% 固件门限)
+		 */
+		xm_write_sysfs("/sys/class/qcom-battery/night_charging", "1\\n", 2);
+		xm_write_sysfs("/sys/class/qcom-battery/restrict_chg", "1\\n", 2);
+		xm_write_sysfs("/sys/class/qcom-battery/restrict_cur", "0\\n", 2);
+	} else {
+		/* 恢复正常快充与充电模式 */
+		xm_write_sysfs("/sys/class/qcom-battery/night_charging", "0\\n", 2);
+		xm_write_sysfs("/sys/class/qcom-battery/restrict_chg", "0\\n", 2);
+		xm_write_sysfs("/sys/class/qcom-battery/restrict_cur", "1000000\\n", 8);
+	}
+}
+
+static void battery_idle_work_fn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(g_battery_idle_work, battery_idle_work_fn);
+
+static void battery_idle_work_fn(struct work_struct *work)
+{
+	if (g_battery_idle_state) {
+		xm_set_hardware_bypass(1);
+		schedule_delayed_work(&g_battery_idle_work, msecs_to_jiffies(3000));
 	}
 }
 
@@ -50,7 +82,7 @@ static ssize_t battery_idle_store(struct device *dev,
 		union power_supply_propval pval;
 
 		if (val) {
-			/* 开启硬件真旁路供电：关闭快充/电荷泵，保存原快充电流，下发 0 uA */
+			/* 开启硬件真旁路供电：硬锁底层限流器、关闭快充/电荷泵，下发 0 uA */
 			g_battery_idle_state = 1;
 			xm_set_hardware_bypass(1);
 			if (psy->desc->get_property &&
@@ -61,9 +93,11 @@ static ssize_t battery_idle_store(struct device *dev,
 			pval.intval = 0;
 			if (psy->desc->set_property)
 				psy->desc->set_property(psy, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &pval);
+			schedule_delayed_work(&g_battery_idle_work, msecs_to_jiffies(3000));
 		} else {
-			/* 关闭硬件真旁路供电：恢复快充/电荷泵，恢复原快充电流 */
+			/* 关闭硬件真旁路供电：停止保活守护，恢复快充与原快充电流 */
 			g_battery_idle_state = 0;
+			cancel_delayed_work_sync(&g_battery_idle_work);
 			xm_set_hardware_bypass(0);
 			pval.intval = (g_saved_fcc > 0) ? g_saved_fcc : -1;
 			if (psy->desc->set_property)
@@ -110,11 +144,12 @@ static const struct attribute_group battery_idle_attr_group = {
 
 thermal_block = '''
 	/*
-	 * 硬件真旁路防护：当旁路模式激活时，阻止外部 mi_thermald 等温控守护进程
-	 * 周期性覆写 CHARGE_CONTROL_LIMIT 从而重新唤醒大电流快充！
+	 * 硬件真旁路防护：当旁路模式激活时，阻止外部 mi_thermald / powerkeeper 等守护进程
+	 * 周期性覆写 CHARGE_CONTROL_LIMIT 或 CONSTANT_CHARGE_CURRENT 重新唤醒大电流！
 	 */
 	if (g_battery_idle_state && psy && psy->desc && psy->desc->type == POWER_SUPPLY_TYPE_BATTERY) {
-		if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT) {
+		if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT ||
+		    psp == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT) {
 			return count;
 		}
 	}
@@ -128,8 +163,14 @@ assert 'static ssize_t power_supply_show_property(' in content, "Marker show_pro
 content = content.replace('static ssize_t power_supply_show_property(', header + '\nstatic ssize_t power_supply_show_property(')
 
 target_status_show = 'if (psp == POWER_SUPPLY_PROP_TYPE) {'
-replacement_status_show = '''if (psp == POWER_SUPPLY_PROP_STATUS && g_battery_idle_state)
-		return sprintf(buf, "Not charging\\n");
+replacement_status_show = '''if (g_battery_idle_state && psy && psy->desc && psy->desc->type == POWER_SUPPLY_TYPE_BATTERY) {
+		if (psp == POWER_SUPPLY_PROP_STATUS)
+			return sprintf(buf, "Not charging\\n");
+		if (psp == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT)
+			return sprintf(buf, "0\\n");
+		if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT)
+			return sprintf(buf, "0\\n");
+	}
 
 	if (psp == POWER_SUPPLY_PROP_TYPE) {'''
 assert target_status_show in content, "Marker target_status_show not found!"
