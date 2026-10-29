@@ -10,8 +10,27 @@ with open(target_file, "r") as f:
     content = f.read()
 
 header = '''
+#include <linux/fs.h>
+#include <linux/cred.h>
+
 static int g_battery_idle_state = 0;
 static int g_saved_fcc = -1;
+
+static void xm_set_hardware_bypass(int enable)
+{
+	struct file *f;
+	loff_t pos = 0;
+	const char *val = enable ? "1\\n" : "0\\n";
+	const struct cred *old_cred;
+
+	old_cred = override_creds(&init_cred);
+	f = filp_open("/sys/class/qcom-battery/night_charging", O_WRONLY, 0);
+	if (!IS_ERR(f)) {
+		kernel_write(f, val, 2, &pos);
+		filp_close(f, NULL);
+	}
+	revert_creds(old_cred);
+}
 
 static ssize_t battery_idle_show(struct device *dev,
 				 struct device_attribute *attr,
@@ -34,8 +53,9 @@ static ssize_t battery_idle_store(struct device *dev,
 		union power_supply_propval pval;
 
 		if (val) {
-			/* 开启硬件真旁路供电：保存原快充电流，并通过硬件接口下发 0 uA */
+			/* 开启硬件真旁路供电：关闭快充/电荷泵，保存原快充电流，下发 0 uA */
 			g_battery_idle_state = 1;
+			xm_set_hardware_bypass(1);
 			if (psy->desc->get_property &&
 			    psy->desc->get_property(psy, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &pval) == 0) {
 				if (pval.intval > 0)
@@ -45,8 +65,9 @@ static ssize_t battery_idle_store(struct device *dev,
 			if (psy->desc->set_property)
 				psy->desc->set_property(psy, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &pval);
 		} else {
-			/* 关闭硬件真旁路供电：恢复原快充电流 */
+			/* 关闭硬件真旁路供电：恢复快充/电荷泵，恢复原快充电流 */
 			g_battery_idle_state = 0;
+			xm_set_hardware_bypass(0);
 			pval.intval = (g_saved_fcc > 0) ? g_saved_fcc : -1;
 			if (psy->desc->set_property)
 				psy->desc->set_property(psy, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &pval);
@@ -108,6 +129,14 @@ visible_patch = '''			if (property == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT)
 
 assert 'static ssize_t power_supply_show_property(' in content, "Marker show_property not found!"
 content = content.replace('static ssize_t power_supply_show_property(', header + '\nstatic ssize_t power_supply_show_property(')
+
+target_status_show = 'if (psp == POWER_SUPPLY_PROP_TYPE) {'
+replacement_status_show = '''if (psp == POWER_SUPPLY_PROP_STATUS && g_battery_idle_state)
+		return sprintf(buf, "Not charging\\n");
+
+	if (psp == POWER_SUPPLY_PROP_TYPE) {'''
+assert target_status_show in content, "Marker target_status_show not found!"
+content = content.replace(target_status_show, replacement_status_show)
 
 target_store = 'value.intval = ret;\n\n\tret = power_supply_set_property(psy, psp, &value);'
 replacement_store = 'value.intval = ret;\n' + thermal_block + '\n\tret = power_supply_set_property(psy, psp, &value);'
