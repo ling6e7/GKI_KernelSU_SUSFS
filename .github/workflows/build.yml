@@ -1660,6 +1660,66 @@ jobs:
       #     rm -rf Image
       #     mv oImage Image
 
+      # ------------------------------------------------------------------
+      # 实验性：out-of-tree 编译小米 QTI 充电驱动
+      # 目的：验证「CI 能否产出 qti_battery_charger_main_m81.ko」。
+      # 这一步失败不应影响 boot.img / AnyKernel3 的产出，因此 continue-on-error
+      # 且不放进上面 retry 包裹的编译步骤里。
+      # ------------------------------------------------------------------
+      - name: 编译 QTI 充电驱动 (实验性)
+        id: build_qti_ko
+        if: inputs.kernel_version == '5.10' && inputs.android_version == 'android12'
+        continue-on-error: true
+        run: |
+          set -x
+          LOG_DIR="$GITHUB_WORKSPACE/build-logs"
+          mkdir -p "$LOG_DIR"
+          KO_LOG="$LOG_DIR/qti_ko-build.log"
+
+          SRC_DIR="$GITHUB_WORKSPACE/ext_module/qti_battery_charger"
+          KOUT="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+
+          {
+            echo "== 驱动源码 =="
+            ls -la "$SRC_DIR" || true
+            echo "== 内核输出目录 =="
+            ls -la "$KOUT" 2>&1 | head -30 || true
+            echo "== .config 存在性 =="
+            test -f "$KOUT/.config" && echo ".config OK" || echo ".config MISSING"
+            echo "== Module.symvers =="
+            ls -la "$KOUT/Module.symvers" 2>&1 || true
+            echo "== 驱动源文件是否依赖小米私有头文件 =="
+            grep -n "^#include" "$SRC_DIR/qti_battery_charger.c" || true
+          } 2>&1 | tee "$KO_LOG"
+
+          if [ ! -f "$KOUT/.config" ]; then
+            echo "SKIP: 未找到内核构建输出 $KOUT/.config"
+            exit 0
+          fi
+
+          make -C "$SRC_DIR" KDIR="$KOUT" ARCH=arm64 LLVM=1 2>&1 | tee -a "$KO_LOG"
+          rc=${PIPESTATUS[0]}
+          echo "make exit code: $rc" | tee -a "$KO_LOG"
+
+          echo "== 产物 =="
+          find "$SRC_DIR" -name '*.ko' -exec ls -la {} \; 2>&1 | tee -a "$KO_LOG" || true
+          for ko in $(find "$SRC_DIR" -name '*.ko'); do
+            echo "--- modinfo $ko ---" | tee -a "$KO_LOG"
+            modinfo "$ko" 2>&1 | tee -a "$KO_LOG" || true
+          done
+          exit $rc
+
+      - name: 上传 QTI 驱动 ko
+        if: ${{ always() && steps.build_qti_ko.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: qti_battery_charger-ko-${{ env.CONFIG }}-${{ inputs.os_patch_level }}
+          path: |
+            ext_module/**/*.ko
+            build-logs/qti_ko-build.log
+          if-no-files-found: warn
+          compression-level: 9
+
       - name: 准备 Boot 镜像
         run: |
           mkdir -p bootimgs
