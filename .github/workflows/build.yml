@@ -1679,14 +1679,16 @@ jobs:
           SRC_DIR="$GITHUB_WORKSPACE/ext_module/qti_battery_charger"
           KOUT="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}"
 
+          # build/build.sh 把内核构建树放在 out/<config>/common/（注意：必须在
+          # 下面的 { } | tee 子 shell 之外计算，否则变量出不来）
+          KBLD="$KOUT/common"
+          [ -f "$KBLD/.config" ] || { [ -f "$KOUT/.config" ] && KBLD="$KOUT"; }
+
           {
             echo "== 驱动源码 =="
             ls -la "$SRC_DIR" || true
             echo "== 内核输出目录 =="
             ls -la "$KOUT" 2>&1 | head -30 || true
-            # build/build.sh 把内核构建树放在 out/<config>/common/
-            KBLD="$KOUT/common"
-            [ -f "$KBLD/.config" ] || KBLD="$KOUT"
             echo "== 实际内核构建树: $KBLD =="
             echo "== .config 存在性 =="
             test -f "$KBLD/.config" && echo ".config OK" || echo ".config MISSING"
