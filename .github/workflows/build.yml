@@ -1705,6 +1705,19 @@ jobs:
             exit 1
           fi
 
+          # 必须用内核同款 AOSP prebuilt clang：系统 clang 不认识
+          # -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
+          CLANG_BIN=$(find "$KERNEL_ROOT" -maxdepth 8 -type f \
+              -path "*prebuilts/clang/host/linux-x86/clang-*/bin/clang" \
+              2>/dev/null | sort -V | tail -1)
+          echo "CLANG_BIN=$CLANG_BIN" | tee -a "$KO_LOG"
+          if [ -n "$CLANG_BIN" ]; then
+            export PATH="$(dirname "$CLANG_BIN"):$PATH"
+            clang --version | head -2 | tee -a "$KO_LOG"
+          else
+            echo "WARN: 未找到 prebuilt clang，回退系统 clang" | tee -a "$KO_LOG"
+          fi
+
           make -C "$SRC_DIR" KDIR="$KBLD" ARCH=arm64 LLVM=1 2>&1 | tee -a "$KO_LOG"
           rc=${PIPESTATUS[0]}
           echo "make exit code: $rc" | tee -a "$KO_LOG"
