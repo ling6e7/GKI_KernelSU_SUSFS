@@ -1707,18 +1707,22 @@ jobs:
 
           # 必须用内核同款 AOSP prebuilt clang：系统 clang 不认识
           # -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
-          CLANG_BIN=$(find "$KERNEL_ROOT" -maxdepth 8 -type f \
-              -path "*prebuilts/clang/host/linux-x86/clang-*/bin/clang" \
+          # 工具链实际位于 prebuilts-master/clang/host/linux-x86/clang-r416183b/bin
+          CLANG_BIN=$(find "$KERNEL_ROOT" -maxdepth 9 -type f \
+              -path "*prebuilts*/clang/host/linux-x86/clang-*/bin/clang" \
               2>/dev/null | sort -V | tail -1)
           echo "CLANG_BIN=$CLANG_BIN" | tee -a "$KO_LOG"
-          if [ -n "$CLANG_BIN" ]; then
-            export PATH="$(dirname "$CLANG_BIN"):$PATH"
-            clang --version | head -2 | tee -a "$KO_LOG"
-          else
-            echo "WARN: 未找到 prebuilt clang，回退系统 clang" | tee -a "$KO_LOG"
+          if [ -z "$CLANG_BIN" ]; then
+            echo "FAIL: 未找到 AOSP prebuilt clang，系统 clang 无法编译该内核模块"
+            exit 1
           fi
+          export PATH="$(dirname "$CLANG_BIN"):$PATH"
+          clang --version | head -2 | tee -a "$KO_LOG"
+          echo "== 内核构建树里记录的 CC ==" | tee -a "$KO_LOG"
+          grep -E "^CONFIG_CC_VERSION_TEXT|^CONFIG_CC_IS_CLANG" "$KBLD/.config" || true
 
-          make -C "$SRC_DIR" KDIR="$KBLD" ARCH=arm64 LLVM=1 2>&1 | tee -a "$KO_LOG"
+          make -C "$SRC_DIR" KDIR="$KBLD" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+              DEPMOD=depmod DTC=dtc 2>&1 | tee -a "$KO_LOG"
           rc=${PIPESTATUS[0]}
           echo "make exit code: $rc" | tee -a "$KO_LOG"
 
