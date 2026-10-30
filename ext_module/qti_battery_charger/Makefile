@@ -29,15 +29,18 @@ KDIR ?= $(abspath $(CURDIR)/../../out/android12-5.10/common)
 PWD  := $(shell pwd)
 ARCH ?= arm64
 LLVM_IAS ?= 1
+CROSS_COMPILE ?= aarch64-linux-gnu-
 
 all:
 	@echo "== KDIR = $(KDIR) =="
 	@test -f "$(KDIR)/.config" || { echo "ERROR: $(KDIR)/.config missing"; exit 1; }
 	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) LLVM=1 LLVM_IAS=$(LLVM_IAS) \
+		CROSS_COMPILE=$(CROSS_COMPILE) \
 		KBUILD_MODPOST_WARN=1 modules
 
 modules_install:
 	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) LLVM=1 LLVM_IAS=$(LLVM_IAS) \
+		CROSS_COMPILE=$(CROSS_COMPILE) \
 		KBUILD_MODPOST_WARN=1 modules_install
 
 clean:
