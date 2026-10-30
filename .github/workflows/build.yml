@@ -1684,20 +1684,26 @@ jobs:
             ls -la "$SRC_DIR" || true
             echo "== 内核输出目录 =="
             ls -la "$KOUT" 2>&1 | head -30 || true
+            # build/build.sh 把内核构建树放在 out/<config>/common/
+            KBLD="$KOUT/common"
+            [ -f "$KBLD/.config" ] || KBLD="$KOUT"
+            echo "== 实际内核构建树: $KBLD =="
             echo "== .config 存在性 =="
-            test -f "$KOUT/.config" && echo ".config OK" || echo ".config MISSING"
+            test -f "$KBLD/.config" && echo ".config OK" || echo ".config MISSING"
             echo "== Module.symvers =="
-            ls -la "$KOUT/Module.symvers" 2>&1 || true
+            ls -la "$KBLD/Module.symvers" 2>&1 || true
+            echo "== include/generated 关键头 =="
+            ls -la "$KBLD/include/generated/autoconf.h" "$KBLD/include/config/auto.conf" 2>&1 || true
             echo "== 驱动源文件是否依赖小米私有头文件 =="
             grep -n "^#include" "$SRC_DIR/qti_battery_charger.c" || true
           } 2>&1 | tee "$KO_LOG"
 
-          if [ ! -f "$KOUT/.config" ]; then
-            echo "SKIP: 未找到内核构建输出 $KOUT/.config"
-            exit 0
+          if [ ! -f "$KBLD/.config" ]; then
+            echo "FAIL: 未找到内核构建树 .config（尝试过 $KOUT 与 $KOUT/common）"
+            exit 1
           fi
 
-          make -C "$SRC_DIR" KDIR="$KOUT" ARCH=arm64 LLVM=1 2>&1 | tee -a "$KO_LOG"
+          make -C "$SRC_DIR" KDIR="$KBLD" ARCH=arm64 LLVM=1 2>&1 | tee -a "$KO_LOG"
           rc=${PIPESTATUS[0]}
           echo "make exit code: $rc" | tee -a "$KO_LOG"
 

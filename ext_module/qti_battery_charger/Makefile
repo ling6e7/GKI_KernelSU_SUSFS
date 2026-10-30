@@ -25,7 +25,7 @@ else
 
 # KDIR must point at the kernel *build* output directory produced by
 # build/build.sh (it holds .config, Module.symvers and the generated headers).
-KDIR ?= $(abspath $(CURDIR)/../../out/android12-5.10)
+KDIR ?= $(abspath $(CURDIR)/../../out/android12-5.10/common)
 PWD  := $(shell pwd)
 ARCH ?= arm64
 
