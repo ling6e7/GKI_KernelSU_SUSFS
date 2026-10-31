@@ -507,6 +507,8 @@ struct battery_chg_dev {
 	struct work_struct		notify_blankstate_work;
 	int				fake_soc;
 	bool				block_tx;
+	u32				xm_probe_start;
+	u32				xm_probe_count;
 	bool				ship_mode_en;
 	bool				debug_battery_detected;
 	bool				wls_fw_update_reqd;
@@ -6351,6 +6353,202 @@ static struct attribute *battery_class_attrs[] = {
 ATTRIBUTE_GROUPS(battery_class);
 
 #ifdef CONFIG_DEBUG_FS
+/* ---------------------------------------------------------------------------
+ * XM_PROP diagnostic toolkit (battery-bypass reverse engineering)
+ *
+ *   xm_table : dump cached psy_list[PSY_TYPE_XM].prop[]. No glink IO.
+ *   xm_probe : echo "<start> <count>" > xm_probe  then read it to actively
+ *              query ADSP for that id range (BC_XM_STATUS_GET per id).
+ *   xm_write : echo "<id> <value>" > xm_write  sends BC_XM_STATUS_SET for any
+ *              property id, including ids the vendor exposed via no sysfs node.
+ * ------------------------------------------------------------------------- */
+#define XM_PROP_NAME_COUNT 159
+static const char * const xm_prop_names[XM_PROP_NAME_COUNT] = {
+	"RESISTANCE_ID", "VERIFY_DIGEST", "CONNECTOR_TEMP", "AUTHENTIC",
+	"CHIP_OK", "VBUS_DISABLE", "REAL_TYPE", "VERIFY_PROCESS",
+	"VDM_CMD_CHARGER_VERSION", "VDM_CMD_CHARGER_VOLTAGE", "VDM_CMD_CHARGER_TEMP", "VDM_CMD_SESSION_SEED",
+	"VDM_CMD_AUTHENTICATION", "VDM_CMD_VERIFIED", "VDM_CMD_REMOVE_COMPENSATION", "VDM_CMD_REVERSE_AUTHEN",
+	"CURRENT_STATE", "ADAPTER_ID", "ADAPTER_SVID", "PD_VERIFED",
+	"PDO2", "UVDM_STATE", "BQ2597X_CHIP_OK", "BQ2597X_SLAVE_CHIP_OK",
+	"BQ2597X_BUS_CURRENT", "BQ2597X_SLAVE_BUS_CURRENT", "BQ2597X_BUS_DELTA", "BQ2597X_BUS_VOLTAGE",
+	"BQ2597X_BATTERY_PRESENT", "BQ2597X_SLAVE_BATTERY_PRESENT", "BQ2597X_BATTERY_VOLTAGE", "MASTER_SMB1396_ONLINE",
+	"MASTER_SMB1396_IIN", "SLAVE_SMB1396_ONLINE", "SLAVE_SMB1396_IIN", "SMB_IIN_DIFF",
+	"CC_ORIENTATION", "INPUT_SUSPEND", "FASTCHGMODE", "NIGHT_CHARGING",
+	"SOC_DECIMAL", "SOC_DECIMAL_RATE", "QUICK_CHARGE_TYPE", "APDO_MAX",
+	"DIE_TEMPERATURE", "SLAVE_DIE_TEMPERATURE", "TX_MACL", "TX_MACH",
+	"RX_CRL", "RX_CRH", "RX_CEP", "BT_STATE",
+	"REVERSE_CHG_MODE", "REVERSE_CHG_STATE", "RX_VOUT", "RX_VRECT",
+	"RX_IOUT", "TX_ADAPTER", "OP_MODE", "WLS_DIE_TEMP",
+	"WLS_BIN", "WLSCHARGE_CONTROL_LIMIT", "FW_VER", "WLS_THERMAL_REMOVE",
+	"WLS_DEBUG", "WLS_FW_STATE", "WLS_CAR_ADAPTER", "WLS_TX_SPEED",
+	"WLS_FC_FLAG", "SHUTDOWN_DELAY", "FAKE_TEMP", "THERMAL_REMOVE",
+	"TYPEC_MODE", "MTBF_CURRENT", "THERMAL_TEMP", "FB_BLANK_STATE",
+	"SMART_BATT", "SHIPMODE_COUNT_RESET", "SPORT_MODE", "BATT_CONNT_ONLINE",
+	"FAKE_CYCLE", "FAKE_SOH", "NVTFG_MONITOR_ISC", "NVTFG_MONITOR_SOA",
+	"OVER_PEAK_FLAG", "CURRENT_DEVIATION", "POWER_DEVIATION", "AVERAGE_CURRENT",
+	"AVERAGE_TEMPERATURE", "START_LEARNING", "STOP_LEARNING", "SET_LEARNING_POWER",
+	"GET_LEARNING_POWER", "GET_LEARNING_POWER_DEV", "GET_LEARNING_TIME_DEV", "SET_CONSTANT_POWER",
+	"GET_REMAINING_TIME", "SET_REFERANCE_POWER", "GET_REFERANCE_CURRENT", "GET_REFERANCE_POWER",
+	"START_LEARNING_B", "STOP_LEARNING_B", "SET_LEARNING_POWER_B", "GET_LEARNING_POWER_B",
+	"GET_LEARNING_POWER_DEV_B", "FG1_QMAX", "FG1_RM", "FG1_FCC",
+	"FG1_SOH", "FG1_FCC_SOH", "FG1_CYCLE", "FG1_FAST_CHARGE",
+	"FG1_CURRENT_MAX", "FG1_VOL_MAX", "FG1_TSIM", "FG1_TAMBIENT",
+	"FG1_TREMQ", "FG1_TFULLQ", "FG1_RSOC", "FG1_AI",
+	"FG1_CELL1_VOL", "FG1_CELL2_VOL", "SLAVE_CHIP_OK", "SLAVE_AUTHENTIC",
+	"FG1_VOL", "FG1_SOC", "FG1_TEMP", "FG1_IBATT",
+	"FG2_VOL", "FG2_SOC", "FG2_TEMP", "FG2_IBATT",
+	"FG2_QMAX", "FG2_RM", "FG2_FCC", "FG2_SOH",
+	"FG2_FCC_SOH", "FG2_CYCLE", "FG2_FAST_CHARGE", "FG2_CURRENT_MAX",
+	"FG2_VOL_MAX", "FG2_TSIM", "FG2_TAMBIENT", "FG2_TREMQ",
+	"FG2_TFULLQ", "FG2_RSOC", "FG_VENDOR_ID", "FG_VOLTAGE_MAX",
+	"FG_TEMP_MAX", "FG_TEMP_MIN", "FG_TIME_HT", "FG_TIME_OT",
+	"FG_TIME_UT", "FG_TIME_LT", "FG_SEAL_SET", "FG1_SEAL_STATE",
+	"FG1_DF_CHECK", "FG2_SEAL_STATE", "FG2_DF_CHECK",
+};
+
+static const char *xm_prop_name(u32 id)
+{
+	return (id < XM_PROP_NAME_COUNT) ? xm_prop_names[id] : "?";
+}
+
+static int xm_table_show(struct seq_file *s, void *unused)
+{
+	struct battery_chg_dev *bcdev = s->private;
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_XM];
+	u32 i;
+
+	seq_printf(s, "# psy_list[PSY_TYPE_XM] prop_count=%u opcode_get=0x%x opcode_set=0x%x\n",
+		   pst->prop_count, pst->opcode_get, pst->opcode_set);
+	if (!pst->prop)
+		return 0;
+
+	for (i = 0; i < pst->prop_count; i++)
+		seq_printf(s, "%3u %-30s %11u (0x%08x)\n",
+			   i, xm_prop_name(i), pst->prop[i], pst->prop[i]);
+	return 0;
+}
+
+static int xm_table_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, xm_table_show, inode->i_private);
+}
+
+static const struct file_operations xm_table_fops = {
+	.owner	 = THIS_MODULE,
+	.open	 = xm_table_open,
+	.read	 = seq_read,
+	.llseek	 = seq_lseek,
+	.release = single_release,
+};
+
+static int xm_probe_show(struct seq_file *s, void *unused)
+{
+	struct battery_chg_dev *bcdev = s->private;
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_XM];
+	u32 i, end;
+	int rc;
+
+	if (!pst->prop)
+		return 0;
+
+	end = bcdev->xm_probe_start + bcdev->xm_probe_count;
+	if (end > pst->prop_count)
+		end = pst->prop_count;
+
+	seq_printf(s, "# active query start=%u end=%u opcode_get=0x%x\n",
+		   bcdev->xm_probe_start, end, pst->opcode_get);
+
+	for (i = bcdev->xm_probe_start; i < end; i++) {
+		u32 before = pst->prop[i];
+
+		rc = read_property_id(bcdev, pst, i);
+		if (rc < 0) {
+			seq_printf(s, "%3u %-30s rc=%d (cached %u)\n",
+				   i, xm_prop_name(i), rc, before);
+			continue;
+		}
+		seq_printf(s, "%3u %-30s %11u (0x%08x)%s\n",
+			   i, xm_prop_name(i), pst->prop[i], pst->prop[i],
+			   (pst->prop[i] != before) ? " CHANGED" : "");
+	}
+	return 0;
+}
+
+static int xm_probe_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, xm_probe_show, inode->i_private);
+}
+
+static ssize_t xm_probe_write(struct file *file, const char __user *ubuf,
+			      size_t count, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+	struct battery_chg_dev *bcdev = s->private;
+	unsigned int start = 0, cnt = 0;
+	char buf[64];
+	int n;
+
+	if (count == 0 || count >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+	buf[count] = '\0';
+
+	n = sscanf(buf, "%u %u", &start, &cnt);
+	if (n != 2)
+		return -EINVAL;
+	if (start >= XM_PROP_MAX)
+		return -EINVAL;
+	if (cnt == 0 || cnt > XM_PROP_MAX)
+		cnt = 1;
+
+	bcdev->xm_probe_start = start;
+	bcdev->xm_probe_count = cnt;
+	return count;
+}
+
+static const struct file_operations xm_probe_fops = {
+	.owner	 = THIS_MODULE,
+	.open	 = xm_probe_open,
+	.read	 = seq_read,
+	.write	 = xm_probe_write,
+	.llseek	 = seq_lseek,
+	.release = single_release,
+};
+
+static ssize_t xm_write_store(struct file *file, const char __user *ubuf,
+			      size_t count, loff_t *ppos)
+{
+	struct battery_chg_dev *bcdev = file->private_data;
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_XM];
+	unsigned int id = 0, val = 0;
+	char buf[64];
+	int n, rc;
+
+	if (count == 0 || count >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+	buf[count] = '\0';
+
+	n = sscanf(buf, "%u %u", &id, &val);
+	if (n < 1)
+		return -EINVAL;
+
+	rc = write_property_id(bcdev, pst, id, val);
+	pr_err("xm_write: id=%u(%s) val=%u rc=%d\n",
+	       id, xm_prop_name(id), val, rc);
+
+	return count;
+}
+
+static const struct file_operations xm_write_fops = {
+	.owner	 = THIS_MODULE,
+	.open	 = simple_open,
+	.write	 = xm_write_store,
+	.llseek	 = no_llseek,
+};
+
 static void battery_chg_add_debugfs(struct battery_chg_dev *bcdev)
 {
 	int rc;
@@ -6371,6 +6569,10 @@ static void battery_chg_add_debugfs(struct battery_chg_dev *bcdev)
 			rc);
 		goto error;
 	}
+
+	debugfs_create_file("xm_table", 0400, dir, bcdev, &xm_table_fops);
+	debugfs_create_file("xm_probe", 0600, dir, bcdev, &xm_probe_fops);
+	debugfs_create_file("xm_write", 0200, dir, bcdev, &xm_write_fops);
 
 	bcdev->debugfs_dir = dir;
 
