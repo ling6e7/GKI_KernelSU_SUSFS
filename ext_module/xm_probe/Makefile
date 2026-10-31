@@ -10,7 +10,9 @@ ifneq ($(KERNELRELEASE),)
 
 obj-m := xm_probe.o
 
+ccflags-y += -I$(src)/include
 ccflags-y += -Wno-unused-function -Wno-unused-variable
+ccflags-y += -DCONFIG_QTI_PMIC_GLINK=1
 
 else
 
