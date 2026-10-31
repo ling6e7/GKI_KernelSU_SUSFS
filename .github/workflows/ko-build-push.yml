@@ -1,0 +1,88 @@
+# 仅用于在 Actions dispatch 被禁用时通过 push 触发内核+ko 构建。
+# 固定参数：android12 / 5.10 / 2025-05 / SukiSU / droidspaces 678。
+name: ko-build-push
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  push:
+    paths:
+      - "ext_module/**"
+      - ".github/workflows/ko-build-push.yml"
+
+concurrency:
+  group: ko-build-push
+  cancel-in-progress: true
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      sub_level: ${{ steps.resolve.outputs.sub_level }}
+      kernel_full: ${{ steps.resolve.outputs.kernel_full }}
+    steps:
+      - name: 检出版本数据
+        uses: actions/checkout@v7
+
+      - name: 解析安全补丁级别
+        id: resolve
+        run: |
+          python3 <<'PY'
+          import json, os
+          from pathlib import Path
+
+          kernel_version = "5.10"
+          os_patch_level = "2025-05"
+          data_path = Path("data") / "android12" / f"{kernel_version}.json"
+
+          if not data_path.exists():
+              print(f"::error::未找到版本数据: {data_path}")
+              raise SystemExit(1)
+
+          data = json.loads(data_path.read_text(encoding="utf-8"))
+          matched = next(
+              (e for e in data.get("entries", []) if e.get("date") == os_patch_level),
+              None,
+          )
+          if matched is None:
+              print(f"::error::未找到 2025-05 对应版本")
+              raise SystemExit(1)
+
+          kernel_full = matched.get("kernel", "")
+          sub_level = kernel_full.rsplit(".", 1)[-1]
+          print(f"解析结果: android12 / {kernel_full}，子版本号: {sub_level}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"sub_level={sub_level}\n")
+              out.write(f"kernel_full={kernel_full}\n")
+          PY
+
+  build:
+    name: "${{ needs.resolve-version.outputs.kernel_full }}-android12-2025-05"
+    needs: resolve-version
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      android_version: "android12"
+      kernel_version: "5.10"
+      sub_level: ${{ needs.resolve-version.outputs.sub_level }}
+      os_patch_level: "2025-05"
+      revision: "r1"
+      ksu_variant: "SukiSU"
+      version: ""
+      build_time: ""
+      use_zram: false
+      use_bbg: false
+      use_kpm: false
+      use_rekernel: false
+      use_nomount: false
+      use_networking: false
+      cve_2026_43499_patch: false
+      supp_op: false
+      enable_susfs: true
+      ksu_mode: "关闭"
+      droidspaces: "678"
+      droidspaces_ntsync: true
+      artifact_upload_mode: "仅上传 AnyKernel3.zip"
