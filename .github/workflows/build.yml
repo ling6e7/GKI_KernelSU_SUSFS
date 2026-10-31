@@ -1677,6 +1677,7 @@ jobs:
           KO_LOG="$LOG_DIR/qti_ko-build.log"
 
           SRC_DIR="$GITHUB_WORKSPACE/ext_module/qti_battery_charger"
+          PROBE_DIR="$GITHUB_WORKSPACE/ext_module/xm_probe"
           KOUT="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}"
 
           # build/build.sh 把内核构建树放在 out/<config>/common/（注意：必须在
@@ -1733,9 +1734,15 @@ jobs:
           rc=${PIPESTATUS[0]}
           echo "make exit code: $rc" | tee -a "$KO_LOG"
 
+          echo "== 编译独立探测模块 xm_probe ==" | tee -a "$KO_LOG"
+          make -C "$PROBE_DIR" KDIR="$KBLD" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              DEPMOD=depmod DTC=dtc 2>&1 | tee -a "$KO_LOG"
+          echo "xm_probe make exit code: $?" | tee -a "$KO_LOG"
+
           echo "== 产物 =="
-          find "$SRC_DIR" -name '*.ko' -exec ls -la {} \; 2>&1 | tee -a "$KO_LOG" || true
-          for ko in $(find "$SRC_DIR" -name '*.ko'); do
+          find "$SRC_DIR" "$PROBE_DIR" -name '*.ko' -exec ls -la {} \; 2>&1 | tee -a "$KO_LOG" || true
+          for ko in $(find "$SRC_DIR" "$PROBE_DIR" -name '*.ko'); do
             echo "--- modinfo $ko ---" | tee -a "$KO_LOG"
             modinfo "$ko" 2>&1 | tee -a "$KO_LOG" || true
           done
